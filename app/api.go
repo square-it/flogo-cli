@@ -7,7 +7,6 @@ import (
 	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"html/template"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,8 +20,6 @@ import (
 	"github.com/TIBCOSoftware/flogo-cli/env"
 	"github.com/TIBCOSoftware/flogo-cli/util"
 	"github.com/callum-ramage/jsonconfig"
-
-	dep_lib "github.com/golang/dep"
 )
 
 // dockerfile is the template for a dockerfile needed to build a docker image
@@ -481,7 +478,7 @@ func InstallPalette(env env.Project, path string) error {
 	}
 
 	for _, dep := range deps {
-		err = InstallDependency(env, dep.Ref, "")
+		err = InstallDependency(env, dep.Ref, dep.Ref, "", false, false)
 		if err != nil {
 			return err
 		}
@@ -493,7 +490,7 @@ func InstallPalette(env env.Project, path string) error {
 }
 
 // InstallDependency install a dependency
-func InstallDependency(environ env.Project, path string, version string) error {
+func InstallDependency(environ env.Project, path, source string, version string, updateIfExists, isOverride bool) error {
 	// Create the dep manager
 	depManager := dep.DepManager{Env: environ}
 	if !depManager.IsInitialized() {
@@ -503,7 +500,8 @@ func InstallDependency(environ env.Project, path string, version string) error {
 			return err
 		}
 	}
-	err := depManager.InstallDependency(path, version)
+
+	err := depManager.InstallDependency(path, version, source, updateIfExists, isOverride)
 	if err != nil {
 		return err
 	}
@@ -595,23 +593,11 @@ func ListDependencies(env env.Project, cType config.ContribType) ([]*config.Depe
 }
 
 // Ensure is a wrapper for dep ensure command
-func Ensure(depManager *dep.DepManager, developmentMode bool, args ...string) (err error) {
-	err = depManager.Ensure(args...)
+func Ensure(depManager *dep.DepManager, developmentMode bool, args ...string) (result error) {
+	result = depManager.Ensure(args...)
 
 	if developmentMode {
-		ctx := &dep_lib.Ctx{
-			WorkingDir: depManager.Env.GetAppDir(),
-			GOPATH:     depManager.Env.GetRootDir(),
-			Out:        log.New(os.Stdout, "", 0),
-			Err:        log.New(os.Stderr, "", 0),
-		}
-		ctx.SetPaths(depManager.Env.GetAppDir(), depManager.Env.GetRootDir())
-
-		project, err := ctx.LoadProject()
-		if err != nil {
-			logger.Errorf("unable to load project with Go dep")
-			return
-		}
+		project, err := depManager.LoadProject()
 
 		// set $GOPATH/pkg/dep/sources
 		pkgDepSourcesDir := filepath.Join(depManager.Env.GetRootDir(), "pkg", "dep", "sources")

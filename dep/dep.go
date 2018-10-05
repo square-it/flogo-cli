@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/TIBCOSoftware/flogo-lib/logger"
+	"github.com/golang/dep"
+	"github.com/golang/dep/gps"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,7 +128,7 @@ func (b *DepManager) Ensure(args ...string) error {
 }
 
 // InstallDependency installs the given dependency
-func (b *DepManager) InstallDependency(depPath, depVersion string) error {
+func (b *DepManager) InstallDependency(depPath, depVersion, depSource string, updateIfExists, isOverride bool) error {
 	exists := fgutil.ExecutableExists("dep")
 	if !exists {
 		return errors.New("dep not installed")
@@ -150,7 +154,7 @@ func (b *DepManager) InstallDependency(depPath, depVersion string) error {
 
 	//Validate that the install does not exist in imports.go file
 	for _, imp := range importsFileAst.Imports {
-		if imp.Path.Value == strconv.Quote(depPath) {
+		if imp.Path.Value == strconv.Quote(depPath) && !updateIfExists {
 			fmt.Printf("WARNING: import '%s' already exists, specific import not reinstalled\n", depPath)
 			return nil
 		}
@@ -163,7 +167,11 @@ func (b *DepManager) InstallDependency(depPath, depVersion string) error {
 
 	if existingConstraint != nil {
 		if len(depVersion) > 0 {
-			fmt.Printf("Existing root package version found '%s', to update it please change Gopkg.toml manually\n", existingConstraint.Version)
+			if updateIfExists {
+				b.updateExistingConstraint(existingConstraint, depVersion, depSource, isOverride)
+			} else {
+				fmt.Printf("Existing root package version found '%s', to update it please change Gopkg.toml manually\n", existingConstraint.Version)
+			}
 		}
 	} else {
 		// Constraint does not exist add it
@@ -175,21 +183,23 @@ func (b *DepManager) InstallDependency(depPath, depVersion string) error {
 	}
 
 	// Add the import
-	for i := 0; i < len(importsFileAst.Decls); i++ {
-		d := importsFileAst.Decls[i]
+	if existingConstraint == nil || !updateIfExists {
+		for i := 0; i < len(importsFileAst.Decls); i++ {
+			d := importsFileAst.Decls[i]
 
-		switch d.(type) {
-		case *ast.FuncDecl:
-		// No action
-		case *ast.GenDecl:
-			dd := d.(*ast.GenDecl)
+			switch d.(type) {
+			case *ast.FuncDecl:
+				// No action
+			case *ast.GenDecl:
+				dd := d.(*ast.GenDecl)
 
-			// IMPORT Declarations
-			if dd.Tok == token.IMPORT {
-				// Add the new import
-				newSpec := &ast.ImportSpec{Name: &ast.Ident{Name: "_"}, Path: &ast.BasicLit{Value: strconv.Quote(depPath)}}
-				dd.Specs = append(dd.Specs, newSpec)
-				break
+				// IMPORT Declarations
+				if dd.Tok == token.IMPORT {
+					// Add the new import
+					newSpec := &ast.ImportSpec{Name: &ast.Ident{Name: "_"}, Path: &ast.BasicLit{Value: strconv.Quote(depPath)}}
+					dd.Specs = append(dd.Specs, newSpec)
+					break
+				}
 			}
 		}
 	}
@@ -214,6 +224,61 @@ func (b *DepManager) InstallDependency(depPath, depVersion string) error {
 	}
 
 	fmt.Printf("'%s' installed successfully \n", depPath)
+
+	return nil
+}
+
+func (b *DepManager) LoadProject() (project *dep.Project, err error) {
+	ctx := &dep.Ctx{
+		WorkingDir: b.Env.GetAppDir(),
+		GOPATH:     b.Env.GetRootDir(),
+		Out:        log.New(os.Stdout, "", 0),
+		Err:        log.New(os.Stderr, "", 0),
+	}
+	ctx.SetPaths(b.Env.GetAppDir(), b.Env.GetRootDir())
+
+	project, err = ctx.LoadProject()
+
+	if err != nil {
+		logger.Errorf("unable to load project with Go dep")
+		return nil, err
+	}
+
+	return
+}
+
+func (b *DepManager) updateExistingConstraint(def *ConstraintDef, newVersion string, source string, isOverride bool) (err error) {
+	if def.Version == newVersion {
+		return
+	}
+
+	def.Version = newVersion
+
+	var project *dep.Project
+	project, err = b.LoadProject()
+	if err != nil {
+		return err
+	}
+
+	constraint, err := gps.NewSemverConstraint(newVersion)
+	if err != nil {
+		constraint = gps.NewBranch(newVersion)
+	}
+
+	if isOverride {
+		project.Manifest.Overrides()[gps.ProjectRoot(def.ProjectRoot)] = gps.ProjectProperties{Source: source, Constraint: constraint}
+	} else {
+		project.Manifest.DependencyConstraints()[gps.ProjectRoot(def.ProjectRoot)] = gps.ProjectProperties{Source: source, Constraint: constraint}
+	}
+
+	tb, err := project.Manifest.MarshalTOML()
+	if err != nil {
+		return errors.New("failed to marshal manifest to TOML")
+	}
+
+	if err = ioutil.WriteFile(filepath.Join(b.Env.GetAppDir(), "Gopkg.toml"), tb, 0666); err != nil {
+		return errors.New("failed to write manifest file to temp dir")
+	}
 
 	return nil
 }
