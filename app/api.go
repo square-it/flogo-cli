@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"html/template"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,8 @@ import (
 	"github.com/TIBCOSoftware/flogo-cli/env"
 	"github.com/TIBCOSoftware/flogo-cli/util"
 	"github.com/callum-ramage/jsonconfig"
+
+	dep_lib "github.com/golang/dep"
 )
 
 // dockerfile is the template for a dockerfile needed to build a docker image
@@ -265,7 +269,6 @@ func doPrepare(env env.Project, options *PrepareOptions) (err error) {
 						//)
 						cmd.Env = fgutil.ReplaceEnvValue(os.Environ(), "GOPATH", env.GetRootDir())
 
-
 						err = cmd.Run()
 						if err != nil {
 							return err
@@ -284,7 +287,6 @@ func doPrepare(env env.Project, options *PrepareOptions) (err error) {
 						//	fmt.Sprintf("GOPATH=%s", env.GetRootDir()),
 						//)
 						cmd.Env = fgutil.ReplaceEnvValue(os.Environ(), "GOPATH", env.GetRootDir())
-
 
 						err = cmd.Run()
 						if err != nil {
@@ -593,12 +595,68 @@ func ListDependencies(env env.Project, cType config.ContribType) ([]*config.Depe
 }
 
 // Ensure is a wrapper for dep ensure command
-func Ensure(depManager *dep.DepManager, args ...string) error {
-	return depManager.Ensure(args...)
+func Ensure(depManager *dep.DepManager, developmentMode bool, args ...string) (err error) {
+	err = depManager.Ensure(args...)
+
+	if developmentMode {
+		ctx := &dep_lib.Ctx{
+			WorkingDir: depManager.Env.GetAppDir(),
+			GOPATH:     depManager.Env.GetRootDir(),
+			Out:        log.New(os.Stdout, "", 0),
+			Err:        log.New(os.Stderr, "", 0),
+		}
+		ctx.SetPaths(depManager.Env.GetAppDir(), depManager.Env.GetRootDir())
+
+		project, err := ctx.LoadProject()
+		if err != nil {
+			logger.Errorf("unable to load project with Go dep")
+			return
+		}
+
+		// set $GOPATH/pkg/dep/sources
+		pkgDepSourcesDir := filepath.Join(depManager.Env.GetRootDir(), "pkg", "dep", "sources")
+
+		for project, props := range project.Manifest.Constraints {
+			var projectPaths []string
+			projectPaths = strings.Split(string(project), "/")
+
+			linkFrom := filepath.Join(depManager.Env.GetVendorDir(), filepath.Join(projectPaths...))
+
+			if props.Source != "" { // use alternate source specified in the Constraint if it exists
+				projectPaths = strings.Split(string(props.Source), "/")
+			}
+			srcDirectory := translateDirectoriesToPkgDirectory(projectPaths)
+			linkTo := filepath.Join(pkgDepSourcesDir, srcDirectory)
+
+			err = os.RemoveAll(linkFrom)
+			if err != nil {
+				logger.Errorf("unable to remove directory %s", linkFrom)
+				continue
+			}
+
+			err = os.Symlink(linkTo, linkFrom)
+			if err != nil {
+				logger.Errorf("unable to create symbolic link from %s to %s", linkFrom, linkTo)
+				continue
+			}
+		}
+	}
+
+	return
+}
+
+// dependencies directories in "$GOPATH/pkg" look like "https---github.com-TIBCOSoftware-flogo--contrib"
+// this function converts a directory from "vendor" like "github.com/TIBCOSoftware/flogo-contrib" to the "pkg format"
+func translateDirectoriesToPkgDirectory(dirs []string) string {
+	for k, v := range dirs {
+		dirs[k] = strings.Replace(v, "-", "--", -1)
+	}
+	dirs = append([]string{"https--"}, dirs...)
+
+	return strings.Join(dirs, "-")
 }
 
 func readDescriptor(path string, info os.FileInfo) (*config.Descriptor, error) {
-
 	raw, err := ioutil.ReadFile(path)
 	if err != nil {
 		fmt.Println("error: " + err.Error())
@@ -624,7 +682,6 @@ func generateGoMetadata(env env.Project) error {
 }
 
 func createMetadata(env env.Project, dependency *config.Dependency) error {
-
 	vendorSrc := env.GetVendorSrcDir()
 	mdFilePath := filepath.Join(vendorSrc, dependency.Ref)
 	mdGoFilePath := filepath.Join(vendorSrc, dependency.Ref)
