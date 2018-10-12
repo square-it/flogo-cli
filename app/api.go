@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"html/template"
@@ -624,6 +625,25 @@ func Ensure(depManager *dep.DepManager, developmentMode bool, args ...string) (r
 			if err != nil {
 				logger.Errorf("unable to create symbolic link from %s to %s", linkFrom, linkTo)
 				continue
+			}
+
+			if props.Constraint.String() != "" { // checkout right branch
+				exists := fgutil.ExecutableExists("git")
+				if !exists {
+					return errors.New("git not installed")
+				}
+
+				cmd := exec.Command("git", "checkout", props.Constraint.String())
+				cmd.Dir = linkTo
+
+				cmd.Stdout = nil
+				cmd.Stderr = nil
+
+				err = cmd.Run()
+				if err != nil {
+					result = err
+					break
+				}
 			}
 		}
 	}
