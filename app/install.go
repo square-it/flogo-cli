@@ -25,9 +25,12 @@ func init() {
 }
 
 type cmdInstall struct {
-	option  *cli.OptionInfo
-	version string
-	palette bool
+	option         *cli.OptionInfo
+	version        string
+	source         string
+	override       bool
+	palette        bool
+	updateIfExists bool
 }
 
 // HasOptionInfo implementation of cli.HasOptionInfo.OptionInfo
@@ -38,8 +41,10 @@ func (c *cmdInstall) OptionInfo() *cli.OptionInfo {
 // AddFlags implementation of cli.Command.AddFlags
 func (c *cmdInstall) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&(c.version), "v", "", "version")
+	fs.StringVar(&(c.source), "s", "", "source")
+	fs.BoolVar(&(c.override), "o", false, "override")
 	fs.BoolVar(&(c.palette), "p", false, "palette")
-
+	fs.BoolVar(&(c.updateIfExists), "u", false, "update if exists")
 }
 
 // Exec implementation of cli.Command.Exec
@@ -72,5 +77,10 @@ func (c *cmdInstall) Exec(args []string) error {
 		return InstallPalette(SetupExistingProjectEnv(appDir), contribPath)
 	}
 
-	return InstallDependency(SetupExistingProjectEnv(appDir), contribPath, version)
+	source := contribPath
+	if c.source != "" {
+		source = c.source
+	}
+
+	return InstallDependency(SetupExistingProjectEnv(appDir), contribPath, source, version, c.updateIfExists, c.override)
 }

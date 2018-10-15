@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/TIBCOSoftware/flogo-lib/logger"
 	"html/template"
 	"io/ioutil"
 	"os"
@@ -265,7 +267,6 @@ func doPrepare(env env.Project, options *PrepareOptions) (err error) {
 						//)
 						cmd.Env = fgutil.ReplaceEnvValue(os.Environ(), "GOPATH", env.GetRootDir())
 
-
 						err = cmd.Run()
 						if err != nil {
 							return err
@@ -284,7 +285,6 @@ func doPrepare(env env.Project, options *PrepareOptions) (err error) {
 						//	fmt.Sprintf("GOPATH=%s", env.GetRootDir()),
 						//)
 						cmd.Env = fgutil.ReplaceEnvValue(os.Environ(), "GOPATH", env.GetRootDir())
-
 
 						err = cmd.Run()
 						if err != nil {
@@ -479,7 +479,7 @@ func InstallPalette(env env.Project, path string) error {
 	}
 
 	for _, dep := range deps {
-		err = InstallDependency(env, dep.Ref, "")
+		err = InstallDependency(env, dep.Ref, dep.Ref, "", false, false)
 		if err != nil {
 			return err
 		}
@@ -491,7 +491,7 @@ func InstallPalette(env env.Project, path string) error {
 }
 
 // InstallDependency install a dependency
-func InstallDependency(environ env.Project, path string, version string) error {
+func InstallDependency(environ env.Project, path, source string, version string, updateIfExists, isOverride bool) error {
 	// Create the dep manager
 	depManager := dep.DepManager{Env: environ}
 	if !depManager.IsInitialized() {
@@ -501,7 +501,8 @@ func InstallDependency(environ env.Project, path string, version string) error {
 			return err
 		}
 	}
-	err := depManager.InstallDependency(path, version)
+
+	err := depManager.InstallDependency(path, version, source, updateIfExists, isOverride)
 	if err != nil {
 		return err
 	}
@@ -593,12 +594,75 @@ func ListDependencies(env env.Project, cType config.ContribType) ([]*config.Depe
 }
 
 // Ensure is a wrapper for dep ensure command
-func Ensure(depManager *dep.DepManager, args ...string) error {
-	return depManager.Ensure(args...)
+func Ensure(depManager *dep.DepManager, developmentMode bool, args ...string) (result error) {
+	result = depManager.Ensure(args...)
+
+	if developmentMode {
+		project, err := depManager.LoadProject()
+
+		// set $GOPATH/pkg/dep/sources
+		pkgDepSourcesDir := filepath.Join(depManager.Env.GetRootDir(), "pkg", "dep", "sources")
+
+		for project, props := range project.Manifest.Constraints {
+			var projectPaths []string
+			projectPaths = strings.Split(string(project), "/")
+
+			linkFrom := filepath.Join(depManager.Env.GetVendorDir(), filepath.Join(projectPaths...))
+
+			if props.Source != "" { // use alternate source specified in the Constraint if it exists
+				projectPaths = strings.Split(string(props.Source), "/")
+			}
+			srcDirectory := translateDirectoriesToPkgDirectory(projectPaths)
+			linkTo := filepath.Join(pkgDepSourcesDir, srcDirectory)
+
+			err = os.RemoveAll(linkFrom)
+			if err != nil {
+				logger.Errorf("unable to remove directory %s", linkFrom)
+				continue
+			}
+
+			err = os.Symlink(linkTo, linkFrom)
+			if err != nil {
+				logger.Errorf("unable to create symbolic link from %s to %s", linkFrom, linkTo)
+				continue
+			}
+
+			if props.Constraint.String() != "" { // checkout right branch
+				exists := fgutil.ExecutableExists("git")
+				if !exists {
+					return errors.New("git not installed")
+				}
+
+				cmd := exec.Command("git", "checkout", props.Constraint.String())
+				cmd.Dir = linkTo
+
+				cmd.Stdout = nil
+				cmd.Stderr = nil
+
+				err = cmd.Run()
+				if err != nil {
+					result = err
+					break
+				}
+			}
+		}
+	}
+
+	return
+}
+
+// dependencies directories in "$GOPATH/pkg" look like "https---github.com-TIBCOSoftware-flogo--contrib"
+// this function converts a directory from "vendor" like "github.com/TIBCOSoftware/flogo-contrib" to the "pkg format"
+func translateDirectoriesToPkgDirectory(dirs []string) string {
+	for k, v := range dirs {
+		dirs[k] = strings.Replace(v, "-", "--", -1)
+	}
+	dirs = append([]string{"https--"}, dirs...)
+
+	return strings.Join(dirs, "-")
 }
 
 func readDescriptor(path string, info os.FileInfo) (*config.Descriptor, error) {
-
 	raw, err := ioutil.ReadFile(path)
 	if err != nil {
 		fmt.Println("error: " + err.Error())
@@ -624,7 +688,6 @@ func generateGoMetadata(env env.Project) error {
 }
 
 func createMetadata(env env.Project, dependency *config.Dependency) error {
-
 	vendorSrc := env.GetVendorSrcDir()
 	mdFilePath := filepath.Join(vendorSrc, dependency.Ref)
 	mdGoFilePath := filepath.Join(vendorSrc, dependency.Ref)
